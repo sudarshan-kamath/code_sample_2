@@ -18,6 +18,14 @@ from typing import Dict, Iterable, List, Optional, Sequence
 from urllib.parse import quote
 
 
+# Debug toggles to step through stages manually while learning the flow.
+DEBUG_MOUNT_ONLY = False  # Stop after verifying the mount/unmount cycle.
+DEBUG_DISCOVERY_ONLY = False  # List discovered files but skip validation.
+DEBUG_LIMIT_TARGETS: Optional[int] = None  # e.g. set to 1 to inspect a single file.
+DEBUG_SKIP_FIRST_FRAME = False  # Bypass the first-frame header extraction.
+DEBUG_SKIP_PACKET_COUNT = False  # Skip the packet counting pass.
+
+
 class ValidationError(Exception):
     """Raised when validation prerequisites are not met."""
 
@@ -264,18 +272,20 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
     if result.errors:
         return result
 
-    try:
-        frame_summary = _collect_first_frame(tshark_bin, file_path)
-        result.first_frame = frame_summary
-    except ValidationError as exc:
-        result.errors.append(str(exc))
-        return result
+    if not DEBUG_SKIP_FIRST_FRAME:
+        try:
+            frame_summary = _collect_first_frame(tshark_bin, file_path)
+            result.first_frame = frame_summary
+        except ValidationError as exc:
+            result.errors.append(str(exc))
+            return result
 
-    try:
-        packet_count = _count_packets(tshark_bin, file_path)
-        result.packet_count = packet_count
-    except ValidationError as exc:
-        result.warnings.append(str(exc))
+    if not DEBUG_SKIP_PACKET_COUNT:
+        try:
+            packet_count = _count_packets(tshark_bin, file_path)
+            result.packet_count = packet_count
+        except ValidationError as exc:
+            result.warnings.append(str(exc))
 
     result.ok = not result.errors
     return result
@@ -460,6 +470,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         curlftpfs_bin=curlftpfs_path,
         extra_mount_opts=args.extra_mount_opts,
     ) as mounted_root:
+        if DEBUG_MOUNT_ONLY:
+            print("DEBUG: mount-only stage complete; skipping discovery/validation.")
+            return 0
+
         targets: List[Path]
         if remote_list:
             targets = [mounted_root / rel_path for rel_path in remote_list]
@@ -470,9 +484,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 recursive=args.recursive,
             )
 
+        if DEBUG_DISCOVERY_ONLY:
+            print("DEBUG: discovery-only stage; files found:")
+            for path in targets:
+                print(f"  {path.relative_to(mounted_root)}")
+            return 0
+
         if not targets:
             print("No PCAP files found to validate.", file=sys.stderr)
             return 1
+
+        if DEBUG_LIMIT_TARGETS is not None:
+            targets = targets[:DEBUG_LIMIT_TARGETS]
 
         exit_code = 0
         for file_path in targets:
@@ -495,6 +518,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print(line)
                     if args.fail_on_warning:
                         result.ok = False
+
             if result.errors:
                 for err in result.errors:
                     print(f"  error: {err}", file=sys.stderr)
