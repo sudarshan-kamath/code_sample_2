@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 
 # Debug toggles to step through stages manually while learning the flow.
-DEBUG_MOUNT_ONLY = False  # Stop after verifying the mount/unmount cycle.
+DEBUG_MOUNT_ONLY = True  # Stop after verifying the mount/unmount cycle.
 DEBUG_DISCOVERY_ONLY = False  # List discovered files but skip validation.
 DEBUG_LIMIT_TARGETS: Optional[int] = None  # e.g. set to 1 to inspect a single file.
 DEBUG_SKIP_FIRST_FRAME = False  # Bypass the first-frame header extraction.
@@ -95,7 +95,6 @@ class FTPMount:
         username: Optional[str],
         password: Optional[str],
         curlftpfs_bin: str,
-        extra_mount_opts: Optional[str] = None,
     ) -> None:
         """Initialise the mount manager with remote and local configuration."""
         self.host = host
@@ -104,7 +103,6 @@ class FTPMount:
         self.username = username
         self.password = password
         self.curlftpfs_bin = curlftpfs_bin
-        self.extra_mount_opts = extra_mount_opts
         self._mounted_here = False
 
     def __enter__(self) -> Path:
@@ -125,16 +123,12 @@ class FTPMount:
         if self.remote_path:
             remote = f"{remote}/{self.remote_path}"
 
-        mount_opts = ["ro"]
-        if self.extra_mount_opts:
-            mount_opts.append(self.extra_mount_opts)
-
         command = [
             self.curlftpfs_bin,
             remote,
             str(self.mount_point),
             "-o",
-            ",".join(mount_opts),
+            "ro",
         ]
 
         try:
@@ -408,16 +402,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Path to curlftpfs binary (default: curlftpfs).",
     )
     parser.add_argument(
-        "--extra-mount-opts",
-        help="Additional curlftpfs mount options to append (comma-separated).",
-    )
-    parser.add_argument(
-        "--pcap",
-        action="append",
-        default=[],
-        help="Specific PCAP path(s) relative to the mount root to validate.",
-    )
-    parser.add_argument(
         "--fail-on-warning",
         action="store_true",
         help="Treat tshark warnings as errors.",
@@ -459,7 +443,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     mount_point: Path = args.mount_point.resolve()
-    remote_list: List[str] = args.pcap or []
 
     with FTPMount(
         host=args.ftp_host,
@@ -468,21 +451,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         username=args.username,
         password=password,
         curlftpfs_bin=curlftpfs_path,
-        extra_mount_opts=args.extra_mount_opts,
     ) as mounted_root:
         if DEBUG_MOUNT_ONLY:
             print("DEBUG: mount-only stage complete; skipping discovery/validation.")
             return 0
 
         targets: List[Path]
-        if remote_list:
-            targets = [mounted_root / rel_path for rel_path in remote_list]
-        else:
-            targets = discover_pcaps(
-                mounted_root,
-                args.pcap_pattern,
-                recursive=args.recursive,
-            )
+        targets = discover_pcaps(
+            mounted_root,
+            args.pcap_pattern,
+            recursive=args.recursive,
+        )
 
         if DEBUG_DISCOVERY_ONLY:
             print("DEBUG: discovery-only stage; files found:")
