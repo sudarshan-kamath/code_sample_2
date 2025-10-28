@@ -1,0 +1,13 @@
+{
+  "ftp_host": "ftp.target.local",
+  "ftp_path": "captures",
+  "username": "analyst",
+  "password": "changeme",
+  "password_env": "FTP_PASSWORD",
+  "mount_point": "/home/sudarshan1/pcap_mount",
+  "pcap_patterns": ["*.pcap", "*.pcapng"],
+  "recursive": true,
+  "tshark_bin": "tshark",
+  "curlftpfs_bin": "curlftpfs",
+  "fail_on_warning": false
+}
