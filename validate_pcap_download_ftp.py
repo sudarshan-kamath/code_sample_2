@@ -7,18 +7,234 @@ import argparse
 import ftplib
 import fnmatch
 import getpass
+import json
 import os
 import posixpath
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Type
+import shutil
+import subprocess
 import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Type
 
-from validate_pcap import (
-    ValidationError,
-    validate_pcap as run_validation,
-    _require_binary,
-)
+
+class ValidationError(Exception):
+    """Raised when validation prerequisites are not met."""
+
+
+def _run_command(
+    command: Sequence[str],
+    *,
+    check: bool = True,
+    capture_output: bool = True,
+    text: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Execute a command with consistent defaults."""
+    return subprocess.run(
+        command,
+        check=check,
+        capture_output=capture_output,
+        text=text,
+    )
+
+
+def _require_binary(name: str) -> str:
+    """Return the absolute path for a binary, raising if missing."""
+    path = shutil.which(name)
+    if not path:
+        raise ValidationError(
+            f"Required binary '{name}' is not available on PATH. "
+            f"Install it (e.g. sudo apt install {name})."
+        )
+    return path
+
+
+def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
+    """Classify stderr lines from tshark into warnings vs errors."""
+    warnings: List[str] = []
+    errors: List[str] = []
+    if not stderr:
+        return {"warnings": warnings, "errors": errors}
+
+    keywords = {
+        "malformed": warnings,
+        "truncated": warnings,
+        "corrupt": errors,
+        "error": errors,
+        "failed": errors,
+    }
+
+    for raw_line in stderr.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line_lower = line.lower()
+        matched = False
+        for keyword, bucket in keywords.items():
+            if keyword in line_lower:
+                bucket.append(line)
+                matched = True
+                break
+        if not matched:
+            warnings.append(line)
+
+    return {"warnings": warnings, "errors": errors}
+
+
+def _collect_first_frame(tshark_bin: str, file_path: Path) -> Dict[str, str]:
+    """Extract selected header fields from the first frame."""
+    command = [
+        tshark_bin,
+        "-r",
+        str(file_path),
+        "-T",
+        "json",
+        "-c",
+        "1",
+        "-j",
+        "frame",
+    ]
+    try:
+        completed = _run_command(command)
+    except subprocess.CalledProcessError as exc:
+        raise ValidationError(
+            f"Failed to read first frame from {file_path}: {exc.stderr.strip()}"
+        ) from exc
+
+    try:
+        payload = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"tshark JSON output malformed for {file_path}") from exc
+
+    if not payload:
+        return {}
+
+    first = payload[0]
+    layers = first.get("_source", {}).get("layers", {})
+    frame_layer = layers.get("frame")
+    if not isinstance(frame_layer, dict):
+        return {}
+
+    summary: Dict[str, str] = {}
+    for key in (
+        "frame.number",
+        "frame.len",
+        "frame.cap_len",
+        "frame.protocols",
+        "frame.time",
+        "frame.time_epoch",
+        "frame.offset_shift",
+    ):
+        value = frame_layer.get(key)
+        if isinstance(value, list):
+            if value:
+                summary[key] = str(value[0])
+        elif value is not None:
+            summary[key] = str(value)
+    return summary
+
+
+def _count_packets(tshark_bin: str, file_path: Path) -> int:
+    """Count packets by streaming frame numbers from tshark."""
+    command = [
+        tshark_bin,
+        "-r",
+        str(file_path),
+        "-T",
+        "fields",
+        "-e",
+        "frame.number",
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise ValidationError(f"Unable to launch tshark for counting packets: {exc}") from exc
+
+    assert process.stdout is not None
+    count = 0
+    try:
+        for _ in process.stdout:
+            count += 1
+    finally:
+        process.stdout.close()
+
+    stderr = ""
+    if process.stderr is not None:
+        stderr = process.stderr.read()
+        process.stderr.close()
+
+    returncode = process.wait()
+    if returncode != 0:
+        raise ValidationError(
+            f"tshark returned {returncode} when counting packets for {file_path}: {stderr.strip()}"
+        )
+
+    buckets = _scan_for_warnings(stderr)
+    if buckets["errors"]:
+        raise ValidationError(
+            f"Errors while counting packets for {file_path}: {'; '.join(buckets['errors'])}"
+        )
+    if buckets["warnings"]:
+        raise ValidationError(
+            f"Warnings while counting packets for {file_path}: {'; '.join(buckets['warnings'])}"
+        )
+    return count
+
+
+@dataclass
+class ValidationResult:
+    """Container for tshark validation output."""
+
+    file_path: Path
+    ok: bool
+    packet_count: Optional[int] = None
+    first_frame: Dict[str, str] = field(default_factory=dict)
+    stderr: str = ""
+    warnings: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+
+def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
+    """Run the tshark validation pipeline on a local PCAP file."""
+    primary_cmd = [tshark_bin, "-r", str(file_path), "-n", "-q"]
+    result = ValidationResult(file_path=file_path, ok=False)
+
+    try:
+        completed = _run_command(primary_cmd)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        buckets = _scan_for_warnings(stderr)
+        result.stderr = stderr
+        result.warnings = buckets["warnings"]
+        result.errors = buckets["errors"] or [stderr.strip() or exc.stderr]
+        return result
+
+    result.stderr = completed.stderr or ""
+    buckets = _scan_for_warnings(result.stderr)
+    result.warnings = buckets["warnings"]
+    result.errors = buckets["errors"]
+
+    if result.errors:
+        return result
+
+    try:
+        result.first_frame = _collect_first_frame(tshark_bin, file_path)
+    except ValidationError as exc:
+        result.errors.append(str(exc))
+        return result
+
+    try:
+        result.packet_count = _count_packets(tshark_bin, file_path)
+    except ValidationError as exc:
+        result.warnings.append(str(exc))
+
+    result.ok = not result.errors
+    return result
 
 
 @dataclass
@@ -220,7 +436,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for remote_file in remote_files:
                 print(f"[download] {remote_file.relative_path}")
                 local_path = download_remote_file(ftp, remote_file, destination_root)
-                result = run_validation(tshark_path, local_path)
+                result = validate_pcap(tshark_path, local_path)
 
                 status_ok = result.ok and not (args.fail_on_warning and result.warnings)
                 status = "OK" if status_ok else "FAIL"
