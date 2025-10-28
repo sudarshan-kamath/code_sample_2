@@ -77,11 +77,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Glob pattern for PCAP discovery (can be supplied multiple times).",
     )
     parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Recursively descend into subdirectories when discovering files.",
-    )
-    parser.add_argument(
         "--tshark-bin",
         default="tshark",
         help="Path to the tshark binary (default: tshark).",
@@ -115,73 +110,39 @@ def resolve_password(args: argparse.Namespace) -> Optional[str]:
         raise ValidationError("Password is required but was not provided.") from exc
 
 
-def _mlsd_supported(ftp: ftplib.FTP) -> bool:
-    """Return True when the server supports MLSD listings."""
-    try:
-        list(ftp.mlsd())
-        return True
-    except (ftplib.error_perm, AttributeError):
-        return False
-
-
 def discover_remote_pcaps(
     ftp: ftplib.FTP,
     patterns: Iterable[str],
-    recursive: bool,
 ) -> List[RemoteFile]:
     """Return a list of remote files matching provided patterns."""
     results: List[RemoteFile] = []
-    use_mlsd = _mlsd_supported(ftp)
     pattern_list = list(patterns)
 
-    def walk(path: str, relative: str) -> None:
-        target = path or "."
-        entries: List[tuple[str, dict]]
-        if use_mlsd:
-            try:
-                entries = list(ftp.mlsd(target))  # type: ignore[assignment]
-            except ftplib.error_perm as exc:
-                raise ValidationError(f"Unable to list directory '{target}': {exc}") from exc
-        else:
-            try:
-                names = ftp.nlst(target)
-            except ftplib.error_perm as exc:
-                raise ValidationError(f"Unable to list directory '{target}': {exc}") from exc
-            entries = []
-            for name in names:
-                base = posixpath.basename(name.rstrip("/"))
-                if not base or base in {".", ".."}:
-                    continue
-                entries.append((base, {}))
+    entries: List[tuple[str, Optional[dict]]] = []
+    supports_mlsd = hasattr(ftp, "mlsd")
+    if supports_mlsd:
+        try:
+            entries = [(name, facts) for name, facts in ftp.mlsd()]  # type: ignore[attr-defined]
+        except ftplib.error_perm as exc:
+            raise ValidationError(f"Unable to list directory '.': {exc}") from exc
+    if not entries:
+        try:
+            names = ftp.nlst()
+        except ftplib.error_perm as exc:
+            raise ValidationError(f"Unable to list directory '.': {exc}") from exc
+        entries = [(posixpath.basename(name.rstrip("/")), None) for name in names]
 
-        for name, facts in entries:
-            if name in {".", ".."}:
-                continue
-            remote_full = name if not path else posixpath.join(path, name)
-            relative_path = name if not relative else posixpath.join(relative, name)
+    for name, facts in entries:
+        if not name or name in {".", ".."}:
+            continue
+        is_dir = False
+        if facts and isinstance(facts, dict):
+            is_dir = facts.get("type", "") in {"dir", "cdir", "pdir"}
+        if is_dir:
+            continue
+        if any(fnmatch.fnmatch(name, pattern) for pattern in pattern_list):
+            results.append(RemoteFile(name))
 
-            is_dir = False
-            if use_mlsd and isinstance(facts, dict):
-                is_dir = facts.get("type", "") in {"dir", "cdir", "pdir"}
-            elif recursive:
-                current = ftp.pwd()
-                try:
-                    ftp.cwd(remote_full)
-                    is_dir = True
-                except ftplib.error_perm:
-                    is_dir = False
-                finally:
-                    ftp.cwd(current)
-
-            if is_dir:
-                if recursive:
-                    walk(remote_full, relative_path)
-                continue
-
-            if any(fnmatch.fnmatch(name, pattern) for pattern in pattern_list):
-                results.append(RemoteFile(relative_path))
-
-    walk("", "")
     unique = {entry.relative_path: entry for entry in results}
     return [unique[key] for key in sorted(unique)]
 
@@ -250,7 +211,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             remote_files = discover_remote_pcaps(
                 ftp,
                 args.pcap_pattern,
-                recursive=args.recursive,
             )
             if not remote_files:
                 print("No PCAP files found to download.", file=sys.stderr)
