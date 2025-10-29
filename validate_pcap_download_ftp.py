@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 import ftplib
 import fnmatch
-import getpass
 import json
-import os
 import posixpath
 import shutil
 import subprocess
@@ -18,21 +16,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Type
 
 
-RESET = "\033[0m"
-COLOR_OK = "\033[92m"
-COLOR_WARN = "\033[93m"
-COLOR_FAIL = "\033[91m"
-USE_COLOR = sys.stdout.isatty()
-
-
 class ValidationError(Exception):
     """Raised when validation prerequisites are not met."""
-
-
-def _colored(text: str, color: str) -> str:
-    if not USE_COLOR:
-        return text
-    return f"{color}{text}{RESET}"
 
 
 def _run_command(
@@ -69,13 +54,14 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
     if not stderr:
         return {"warnings": warnings, "errors": errors}
 
-    keywords = {
-        "malformed": warnings,
-        "truncated": warnings,
-        "corrupt": errors,
-        "error": errors,
-        "failed": errors,
-    }
+    patterns = (
+        ("malformed", errors, "Malformed frame: {line}"),
+        ("truncated", warnings, "Packet truncated during capture: {line}"),
+        ("cut short", warnings, "Packet truncated during capture: {line}"),
+        ("corrupt", errors, "Corrupted data detected: {line}"),
+        ("error", errors, "tshark error: {line}"),
+        ("failed", errors, "Operation failed: {line}"),
+    )
 
     for raw_line in stderr.splitlines():
         line = raw_line.strip()
@@ -83,9 +69,9 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
             continue
         line_lower = line.lower()
         matched = False
-        for keyword, bucket in keywords.items():
+        for keyword, bucket, message in patterns:
             if keyword in line_lower:
-                bucket.append(line)
+                bucket.append(message.format(line=line))
                 matched = True
                 break
         if not matched:
@@ -281,17 +267,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--password",
-        help="FTP password; falls back to environment variable or prompt.",
-    )
-    parser.add_argument(
-        "--password-env",
-        default="FTP_PASSWORD",
-        help="Environment variable to read the password from when --password is omitted.",
-    )
-    parser.add_argument(
-        "--use-ftps",
-        action="store_true",
-        help="Use explicit FTPS (FTP over TLS) for the connection.",
+        help="FTP password (omit for anonymous access).",
     )
     parser.add_argument(
         "--download-dir",
@@ -322,21 +298,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Socket timeout for FTP operations in seconds (default: 60).",
     )
     return parser.parse_args(argv)
-
-
-def resolve_password(args: argparse.Namespace) -> Optional[str]:
-    """Resolve FTP password from CLI, environment, or interactive prompt."""
-    if args.password:
-        return args.password
-    env_value = os.getenv(args.password_env)
-    if env_value:
-        return env_value
-    if args.username == "anonymous":
-        return None
-    try:
-        return getpass.getpass("FTP password: ")
-    except (EOFError, KeyboardInterrupt) as exc:
-        raise ValidationError("Password is required but was not provided.") from exc
 
 
 def discover_remote_pcaps(
@@ -413,29 +374,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    try:
-        password = resolve_password(args)
-    except ValidationError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+    password = args.password or ""
 
     destination_root = args.download_dir.resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
 
-    ftp_cls: Type[ftplib.FTP]
-    if args.use_ftps:
-        ftp_cls = ftplib.FTP_TLS
-    else:
-        ftp_cls = ftplib.FTP
+    ftp_cls: Type[ftplib.FTP] = ftplib.FTP
 
     try:
         with ftp_cls() as ftp:
             ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
-            if args.use_ftps and isinstance(ftp, ftplib.FTP_TLS):
-                ftp.auth()
             ftp.login(args.username, password or "")
-            if args.use_ftps and isinstance(ftp, ftplib.FTP_TLS):
-                ftp.prot_p()
             if args.ftp_path and args.ftp_path != "/":
                 ftp.cwd(args.ftp_path)
 
@@ -455,9 +404,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
                 status_ok = result.ok and not (args.fail_on_warning and result.warnings)
                 status = "OK" if status_ok else "FAIL"
-                color = COLOR_OK if status_ok else COLOR_FAIL
-                status_display = _colored(status, color)
-                print(f"[{status_display}] {remote_file.relative_path}")
+                print(f"[{status}] {remote_file.relative_path}")
                 if result.packet_count is not None:
                     print(f"  packets: {result.packet_count}")
                 if result.first_frame:
@@ -466,15 +413,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if result.warnings:
                     for warning in result.warnings:
                         line = f"  warning: {warning}"
-                        print(_colored(line, COLOR_WARN))
+                        print(line)
                         if args.fail_on_warning:
                             result.ok = False
                 if result.errors:
                     for err in result.errors:
-                        message = f"  error: {err}"
-                        if USE_COLOR:
-                            message = f"{COLOR_FAIL}{message}{RESET}"
-                        print(message, file=sys.stderr)
+                        print(f"  error: {err}", file=sys.stderr)
                 if not result.ok or (args.fail_on_warning and result.warnings):
                     exit_code = max(exit_code, 1)
             return exit_code
