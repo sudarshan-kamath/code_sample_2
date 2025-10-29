@@ -250,22 +250,25 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
         "-e",
         "frame.col_info",
     ]
-    try:
-        malformed_result = _run_command(malformed_cmd)
-    except subprocess.CalledProcessError as exc:
+    malformed_proc = subprocess.run(
+        malformed_cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    malformed_line = (malformed_proc.stdout or "").strip()
+    if malformed_proc.returncode not in {0, 1}:
         result.warnings.append(
-            f"Failed to probe malformed frames for {file_path}: {exc.stderr.strip()}"
+            f"Failed to probe malformed frames for {file_path}: {malformed_proc.stderr.strip()}"
         )
-    else:
-        malformed_line = malformed_result.stdout.strip()
-        if malformed_line:
-            parts = malformed_line.split("|", maxsplit=1)
-            frame_no = parts[0].strip()
-            info = parts[1].strip() if len(parts) > 1 else ""
-            summary = f"Malformed frame detected: frame {frame_no}"
-            if info:
-                summary = f"{summary}: {info}"
-            result.errors.append(summary)
+    elif malformed_line:
+        parts = malformed_line.split("|", maxsplit=1)
+        frame_no = parts[0].strip()
+        info = parts[1].strip() if len(parts) > 1 else ""
+        summary = f"Malformed frame detected: frame {frame_no}"
+        if info:
+            summary = f"{summary}: {info}"
+        result.errors.append(summary)
 
     result.ok = not result.errors
     return result
