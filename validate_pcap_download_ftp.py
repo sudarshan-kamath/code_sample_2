@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import ftplib
 import fnmatch
+import getpass
 import json
+import os
 import posixpath
 import shutil
 import subprocess
@@ -16,8 +18,21 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Type
 
 
+RESET = "\033[0m"
+COLOR_OK = "\033[92m"
+COLOR_WARN = "\033[93m"
+COLOR_FAIL = "\033[91m"
+USE_COLOR = sys.stdout.isatty()
+
+
 class ValidationError(Exception):
     """Raised when validation prerequisites are not met."""
+
+
+def _colored(text: str, color: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"{color}{text}{RESET}"
 
 
 def _run_command(
@@ -54,14 +69,13 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
     if not stderr:
         return {"warnings": warnings, "errors": errors}
 
-    patterns = (
-        ("malformed", errors, "Malformed frame: {line}"),
-        ("truncated", warnings, "Packet truncated during capture: {line}"),
-        ("cut short", warnings, "Packet truncated during capture: {line}"),
-        ("corrupt", errors, "Corrupted data detected: {line}"),
-        ("error", errors, "tshark error: {line}"),
-        ("failed", errors, "Operation failed: {line}"),
-    )
+    keywords = {
+        "malformed": warnings,
+        "truncated": warnings,
+        "corrupt": errors,
+        "error": errors,
+        "failed": errors,
+    }
 
     for raw_line in stderr.splitlines():
         line = raw_line.strip()
@@ -69,9 +83,9 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
             continue
         line_lower = line.lower()
         matched = False
-        for keyword, bucket, message in patterns:
+        for keyword, bucket in keywords.items():
             if keyword in line_lower:
-                bucket.append(message.format(line=line))
+                bucket.append(line)
                 matched = True
                 break
         if not matched:
@@ -267,7 +281,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--password",
-        help="FTP password (omit for anonymous access).",
+        help="FTP password; falls back to environment variable or prompt.",
+    )
+    parser.add_argument(
+        "--password-env",
+        default="FTP_PASSWORD",
+        help="Environment variable to read the password from when --password is omitted.",
+    )
+    parser.add_argument(
+        "--use-ftps",
+        action="store_true",
+        help="Use explicit FTPS (FTP over TLS) for the connection.",
     )
     parser.add_argument(
         "--download-dir",
@@ -298,6 +322,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Socket timeout for FTP operations in seconds (default: 60).",
     )
     return parser.parse_args(argv)
+
+
+def resolve_password(args: argparse.Namespace) -> Optional[str]:
+    """Resolve FTP password from CLI, environment, or interactive prompt."""
+    if args.password:
+        return args.password
+    env_value = os.getenv(args.password_env)
+    if env_value:
+        return env_value
+    if args.username == "anonymous":
+        return None
+    try:
+        return getpass.getpass("FTP password: ")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise ValidationError("Password is required but was not provided.") from exc
 
 
 def discover_remote_pcaps(
@@ -364,76 +403,6 @@ def download_remote_file(
     return local_path
 
 
-def render_html_report(results: Iterable[ValidationResult], output_path: Path) -> None:
-    """Render validation results into a simple HTML file."""
-    rows: List[str] = []
-    for item in results:
-        status = "OK" if item.ok else "FAIL"
-        status_class = "status-ok" if item.ok else "status-fail"
-        warnings_html = "".join(f"<li>{warning}</li>" for warning in item.warnings)
-        errors_html = "".join(f"<li>{err}</li>" for err in item.errors)
-        rows.append(
-            """
-            <tr>
-                <td>{file}</td>
-                <td class="{status_class}">{status}</td>
-                <td>{packet_count}</td>
-                <td>
-                    <ul>{warnings}</ul>
-                </td>
-                <td>
-                    <ul>{errors}</ul>
-                </td>
-            </tr>
-            """.format(
-                file=item.file_path.name,
-                status=status,
-                status_class=status_class,
-                packet_count=item.packet_count if item.packet_count is not None else "-",
-                warnings=warnings_html or "<li>None</li>",
-                errors=errors_html or "<li>None</li>",
-            )
-        )
-
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <title>PCAP Validation Report</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 1.5rem; }
-            table { border-collapse: collapse; width: 100%; }
-            th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
-            th { background: #f5f5f5; }
-            .status-ok { color: #1b5e20; font-weight: bold; }
-            .status-fail { color: #c62828; font-weight: bold; }
-            ul { margin: 0; padding-left: 1.2rem; }
-        </style>
-    </head>
-    <body>
-        <h1>PCAP Validation Report</h1>
-        <table>
-            <thead>
-                <tr>
-                    <th>File</th>
-                    <th>Status</th>
-                    <th>Packets</th>
-                    <th>Warnings</th>
-                    <th>Errors</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rows}
-            </tbody>
-        </table>
-    </body>
-    </html>
-    """.format(rows="\n".join(rows))
-
-    output_path.write_text(html_content, encoding="utf-8")
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint for downloading files and invoking the validator."""
     args = parse_args(argv)
@@ -444,17 +413,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    password = args.password or ""
+    try:
+        password = resolve_password(args)
+    except ValidationError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
     destination_root = args.download_dir.resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
 
-    ftp_cls: Type[ftplib.FTP] = ftplib.FTP
+    ftp_cls: Type[ftplib.FTP]
+    if args.use_ftps:
+        ftp_cls = ftplib.FTP_TLS
+    else:
+        ftp_cls = ftplib.FTP
 
     try:
         with ftp_cls() as ftp:
             ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
+            if args.use_ftps and isinstance(ftp, ftplib.FTP_TLS):
+                ftp.auth()
             ftp.login(args.username, password or "")
+            if args.use_ftps and isinstance(ftp, ftplib.FTP_TLS):
+                ftp.prot_p()
             if args.ftp_path and args.ftp_path != "/":
                 ftp.cwd(args.ftp_path)
 
@@ -467,16 +448,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 1
 
             exit_code = 0
-            collected_results: List[ValidationResult] = []
             for remote_file in remote_files:
                 print(f"[download] {remote_file.relative_path}")
                 local_path = download_remote_file(ftp, remote_file, destination_root)
                 result = validate_pcap(tshark_path, local_path)
-                collected_results.append(result)
 
                 status_ok = result.ok and not (args.fail_on_warning and result.warnings)
                 status = "OK" if status_ok else "FAIL"
-                print(f"[{status}] {remote_file.relative_path}")
+                color = COLOR_OK if status_ok else COLOR_FAIL
+                status_display = _colored(status, color)
+                print(f"[{status_display}] {remote_file.relative_path}")
                 if result.packet_count is not None:
                     print(f"  packets: {result.packet_count}")
                 if result.first_frame:
@@ -485,22 +466,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if result.warnings:
                     for warning in result.warnings:
                         line = f"  warning: {warning}"
-                        print(line)
+                        print(_colored(line, COLOR_WARN))
                         if args.fail_on_warning:
                             result.ok = False
                 if result.errors:
                     for err in result.errors:
-                        print(f"  error: {err}", file=sys.stderr)
+                        message = f"  error: {err}"
+                        if USE_COLOR:
+                            message = f"{COLOR_FAIL}{message}{RESET}"
+                        print(message, file=sys.stderr)
                 if not result.ok or (args.fail_on_warning and result.warnings):
                     exit_code = max(exit_code, 1)
-
-            report_path = destination_root / "pcap_validation_report.html"
-            try:
-                render_html_report(collected_results, report_path)
-                print(f"HTML report written to {report_path}")
-            except OSError as exc:
-                print(f"Failed to write HTML report: {exc}", file=sys.stderr)
-
             return exit_code
     except ValidationError as exc:
         print(exc, file=sys.stderr)

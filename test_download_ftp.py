@@ -54,6 +54,13 @@ def build_args(config: Dict[str, Any]) -> List[str]:
     if password:
         args.extend(["--password", str(password)])
 
+    password_env = config.get("password_env")
+    if password_env:
+        args.extend(["--password-env", str(password_env)])
+
+    if config.get("use_ftps"):
+        args.append("--use-ftps")
+
     patterns = config.get("pcap_patterns")
     if patterns:
         if not isinstance(patterns, list):
