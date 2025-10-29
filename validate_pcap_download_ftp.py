@@ -54,13 +54,14 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
     if not stderr:
         return {"warnings": warnings, "errors": errors}
 
-    keywords = {
-        "malformed": warnings,
-        "truncated": warnings,
-        "corrupt": errors,
-        "error": errors,
-        "failed": errors,
-    }
+    patterns = (
+        ("malformed", errors, "Malformed frame: {line}"),
+        ("truncated", warnings, "Packet truncated during capture: {line}"),
+        ("cut short", warnings, "Packet truncated during capture: {line}"),
+        ("corrupt", errors, "Corrupted data detected: {line}"),
+        ("error", errors, "tshark error: {line}"),
+        ("failed", errors, "Operation failed: {line}"),
+    )
 
     for raw_line in stderr.splitlines():
         line = raw_line.strip()
@@ -68,9 +69,9 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
             continue
         line_lower = line.lower()
         matched = False
-        for keyword, bucket in keywords.items():
+        for keyword, bucket, message in patterns:
             if keyword in line_lower:
-                bucket.append(line)
+                bucket.append(message.format(line=line))
                 matched = True
                 break
         if not matched:
