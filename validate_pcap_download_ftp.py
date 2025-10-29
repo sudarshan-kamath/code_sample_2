@@ -16,8 +16,20 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Type
 
 
+RESET = "\033[0m"
+COLOR_OK = "\033[92m"
+COLOR_FAIL = "\033[91m"
+USE_COLOR = sys.stderr.isatty()
+
+
 class ValidationError(Exception):
     """Raised when validation prerequisites are not met."""
+
+
+def _color(text: str, color: str) -> str:
+    if not USE_COLOR:
+        return text
+    return f"{color}{text}{RESET}"
 
 
 def _run_command(
@@ -381,6 +393,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     ftp_cls: Type[ftplib.FTP] = ftplib.FTP
 
+    error_log_path = destination_root / "error.log"
+    error_entries: List[str] = []
+
+    def _finalize(exit_code: int) -> int:
+        if error_entries:
+            try:
+                error_log_path.write_text("\n\n".join(error_entries) + "\n", encoding="utf-8")
+            except OSError as exc:
+                print(f"Failed to write error log {error_log_path}: {exc}", file=sys.stderr)
+                return 2
+            fail_msg = _color("[FAIL]", COLOR_FAIL)
+            print(f"{fail_msg} Look here for error log: {error_log_path}", file=sys.stderr)
+            return exit_code if exit_code != 0 else 1
+        if error_log_path.exists():
+            try:
+                error_log_path.unlink()
+            except OSError:
+                pass
+        ok_msg = _color("[OK] All PCAP files are valid", COLOR_OK)
+        print(ok_msg, file=sys.stderr)
+        return 0
+
     try:
         with ftp_cls() as ftp:
             ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
@@ -393,8 +427,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.pcap_pattern,
             )
             if not remote_files:
-                print("No PCAP files found to download.", file=sys.stderr)
-                return 1
+                error_entries.append("No PCAP files found to download.")
+                return _finalize(1)
 
             exit_code = 0
             for remote_file in remote_files:
@@ -407,27 +441,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"[{status}] {remote_file.relative_path}")
                 if result.packet_count is not None:
                     print(f"  packets: {result.packet_count}")
-                if result.first_frame:
-                    for key, value in result.first_frame.items():
-                        print(f"  {key}: {value}")
                 if result.warnings:
                     for warning in result.warnings:
                         line = f"  warning: {warning}"
                         print(line)
                         if args.fail_on_warning:
                             result.ok = False
+                if not status_ok:
+                    block_lines: List[str] = [f"File: {remote_file.relative_path}"]
+                    if result.warnings:
+                        block_lines.append("Warnings:")
+                        block_lines.extend(f"  - {warning}" for warning in result.warnings)
+                    if result.errors:
+                        block_lines.append("Errors:")
+                        block_lines.extend(f"  - {err}" for err in result.errors)
+                    if not result.errors and not result.warnings:
+                        block_lines.append("No additional details available.")
+                    error_entries.append("\n".join(block_lines))
                 if result.errors:
-                    for err in result.errors:
-                        print(f"  error: {err}", file=sys.stderr)
-                if not result.ok or (args.fail_on_warning and result.warnings):
                     exit_code = max(exit_code, 1)
-            return exit_code
+                elif args.fail_on_warning and result.warnings:
+                    exit_code = max(exit_code, 1)
+            return _finalize(exit_code)
     except ValidationError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+        error_entries.append(str(exc))
+        return _finalize(2)
     except ftplib.all_errors as exc:
-        print(f"FTP error: {exc}", file=sys.stderr)
-        return 2
+        error_entries.append(f"FTP error: {exc}")
+        return _finalize(2)
 
 
 if __name__ == "__main__":
