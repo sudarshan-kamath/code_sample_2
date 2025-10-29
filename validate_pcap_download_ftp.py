@@ -364,6 +364,76 @@ def download_remote_file(
     return local_path
 
 
+def render_html_report(results: Iterable[ValidationResult], output_path: Path) -> None:
+    """Render validation results into a simple HTML file."""
+    rows: List[str] = []
+    for item in results:
+        status = "OK" if item.ok else "FAIL"
+        status_class = "status-ok" if item.ok else "status-fail"
+        warnings_html = "".join(f"<li>{warning}</li>" for warning in item.warnings)
+        errors_html = "".join(f"<li>{err}</li>" for err in item.errors)
+        rows.append(
+            """
+            <tr>
+                <td>{file}</td>
+                <td class="{status_class}">{status}</td>
+                <td>{packet_count}</td>
+                <td>
+                    <ul>{warnings}</ul>
+                </td>
+                <td>
+                    <ul>{errors}</ul>
+                </td>
+            </tr>
+            """.format(
+                file=item.file_path.name,
+                status=status,
+                status_class=status_class,
+                packet_count=item.packet_count if item.packet_count is not None else "-",
+                warnings=warnings_html or "<li>None</li>",
+                errors=errors_html or "<li>None</li>",
+            )
+        )
+
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>PCAP Validation Report</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 1.5rem; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+            th { background: #f5f5f5; }
+            .status-ok { color: #1b5e20; font-weight: bold; }
+            .status-fail { color: #c62828; font-weight: bold; }
+            ul { margin: 0; padding-left: 1.2rem; }
+        </style>
+    </head>
+    <body>
+        <h1>PCAP Validation Report</h1>
+        <table>
+            <thead>
+                <tr>
+                    <th>File</th>
+                    <th>Status</th>
+                    <th>Packets</th>
+                    <th>Warnings</th>
+                    <th>Errors</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </body>
+    </html>
+    """.format(rows="\n".join(rows))
+
+    output_path.write_text(html_content, encoding="utf-8")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entrypoint for downloading files and invoking the validator."""
     args = parse_args(argv)
