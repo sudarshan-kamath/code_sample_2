@@ -3,10 +3,8 @@
   "ftp_path": "captures",
   "username": "analyst",
   "password": "changeme",
-  "password_env": "FTP_PASSWORD",
   "download_dir": "/home/sudarshan1/pcap_downloads",
   "pcap_patterns": ["*.pcap", "*.pcapng"],
-  "use_ftps": false,
   "tshark_bin": "tshark",
   "fail_on_warning": false,
   "timeout": 60.0

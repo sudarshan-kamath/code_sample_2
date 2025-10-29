@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 import ftplib
 import fnmatch
-import getpass
 import json
-import os
 import posixpath
 import shutil
 import subprocess
@@ -233,43 +231,6 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
     except ValidationError as exc:
         result.warnings.append(str(exc))
 
-    malformed_probe = [
-        tshark_bin,
-        "-r",
-        str(file_path),
-        "-Y",
-        "_ws.malformed",
-        "-c",
-        "1",
-        "-T",
-        "fields",
-        "-E",
-        "separator=|",
-        "-e",
-        "frame.number",
-        "-e",
-        "frame.col_info",
-    ]
-    malformed_proc = subprocess.run(
-        malformed_probe,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    malformed_line = (malformed_proc.stdout or "").strip()
-    if malformed_proc.returncode not in {0, 1}:
-        result.warnings.append(
-            f"Failed to check for malformed frames: {malformed_proc.stderr.strip()}"
-        )
-    elif malformed_line:
-        parts = malformed_line.split("|", maxsplit=1)
-        frame_no = parts[0].strip()
-        info = parts[1].strip() if len(parts) > 1 else ""
-        summary = f"Malformed frame detected: frame {frame_no}"
-        if info:
-            summary = f"{summary}: {info}"
-        result.errors.append(summary)
-
     result.ok = not result.errors
     return result
 
@@ -305,17 +266,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--password",
-        help="FTP password; falls back to environment variable or prompt.",
-    )
-    parser.add_argument(
-        "--password-env",
-        default="FTP_PASSWORD",
-        help="Environment variable to read the password from when --password is omitted.",
-    )
-    parser.add_argument(
-        "--use-ftps",
-        action="store_true",
-        help="Use explicit FTPS (FTP over TLS) for the connection.",
+        help="FTP password (omit for anonymous access).",
     )
     parser.add_argument(
         "--download-dir",
@@ -346,21 +297,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Socket timeout for FTP operations in seconds (default: 60).",
     )
     return parser.parse_args(argv)
-
-
-def resolve_password(args: argparse.Namespace) -> Optional[str]:
-    """Resolve FTP password from CLI, environment, or interactive prompt."""
-    if args.password:
-        return args.password
-    env_value = os.getenv(args.password_env)
-    if env_value:
-        return env_value
-    if args.username == "anonymous":
-        return None
-    try:
-        return getpass.getpass("FTP password: ")
-    except (EOFError, KeyboardInterrupt) as exc:
-        raise ValidationError("Password is required but was not provided.") from exc
 
 
 def discover_remote_pcaps(
@@ -437,29 +373,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    try:
-        password = resolve_password(args)
-    except ValidationError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+    password = args.password or ""
 
     destination_root = args.download_dir.resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
 
-    ftp_cls: Type[ftplib.FTP]
-    if args.use_ftps:
-        ftp_cls = ftplib.FTP_TLS
-    else:
-        ftp_cls = ftplib.FTP
+    ftp_cls: Type[ftplib.FTP] = ftplib.FTP
 
     try:
         with ftp_cls() as ftp:
             ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
-            if args.use_ftps and isinstance(ftp, ftplib.FTP_TLS):
-                ftp.auth()
             ftp.login(args.username, password or "")
-            if args.use_ftps and isinstance(ftp, ftplib.FTP_TLS):
-                ftp.prot_p()
             if args.ftp_path and args.ftp_path != "/":
                 ftp.cwd(args.ftp_path)
 
