@@ -57,8 +57,8 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
         return {"warnings": warnings, "errors": errors}
 
     keywords = {
-        "malformed": errors,
-        "truncated": errors,
+        "malformed": warnings,
+        "truncated": warnings,
         "corrupt": errors,
         "error": errors,
         "failed": errors,
@@ -233,7 +233,7 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
     except ValidationError as exc:
         result.warnings.append(str(exc))
 
-    malformed_cmd = [
+    malformed_probe = [
         tshark_bin,
         "-r",
         str(file_path),
@@ -251,24 +251,24 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
         "frame.col_info",
     ]
     malformed_proc = subprocess.run(
-        malformed_cmd,
+        malformed_probe,
         check=False,
         capture_output=True,
         text=True,
     )
-    malformed_output = (malformed_proc.stdout or "").strip()
+    malformed_line = (malformed_proc.stdout or "").strip()
     if malformed_proc.returncode not in {0, 1}:
         result.warnings.append(
-            f"Malformed frame probe failed for {file_path}: {malformed_proc.stderr.strip()}"
+            f"Failed to check for malformed frames: {malformed_proc.stderr.strip()}"
         )
-    elif malformed_output:
-        frame_info = malformed_output.split("|", maxsplit=1)
-        frame_number = frame_info[0].strip()
-        detail = frame_info[1].strip() if len(frame_info) > 1 else ""
-        message = f"Malformed frame detected: frame {frame_number}"
-        if detail:
-            message = f"{message}: {detail}"
-        result.errors.append(message)
+    elif malformed_line:
+        parts = malformed_line.split("|", maxsplit=1)
+        frame_no = parts[0].strip()
+        info = parts[1].strip() if len(parts) > 1 else ""
+        summary = f"Malformed frame detected: frame {frame_no}"
+        if info:
+            summary = f"{summary}: {info}"
+        result.errors.append(summary)
 
     result.ok = not result.errors
     return result
