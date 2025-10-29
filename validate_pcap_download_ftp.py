@@ -339,8 +339,10 @@ def discover_remote_pcaps(
     if supports_mlsd:
         try:
             entries = [(name, facts) for name, facts in ftp.mlsd()]  # type: ignore[attr-defined]
-        except ftplib.error_perm as exc:
-            raise ValidationError(f"Unable to list directory '.': {exc}") from exc
+        except ftplib.error_perm:
+            entries = []
+        except AttributeError:
+            entries = []
     if not entries:
         try:
             names = ftp.nlst()
@@ -436,9 +438,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for remote_file in remote_files:
                 print(f"[download] {remote_file.relative_path}")
                 local_path = download_remote_file(ftp, remote_file, destination_root)
-                print(f"[downloaded-only] {remote_file.relative_path} -> {local_path}")
-                # Remove the return/continue below to re-enable validation.
-                return 0
+                result = validate_pcap(tshark_path, local_path)
+
+                status_ok = result.ok and not (args.fail_on_warning and result.warnings)
+                status = "OK" if status_ok else "FAIL"
+                print(f"[{status}] {remote_file.relative_path}")
+                if result.packet_count is not None:
+                    print(f"  packets: {result.packet_count}")
+                if result.first_frame:
+                    for key, value in result.first_frame.items():
+                        print(f"  {key}: {value}")
+                if result.warnings:
+                    for warning in result.warnings:
+                        line = f"  warning: {warning}"
+                        print(line)
+                        if args.fail_on_warning:
+                            result.ok = False
+                if result.errors:
+                    for err in result.errors:
+                        print(f"  error: {err}", file=sys.stderr)
+                if not result.ok or (args.fail_on_warning and result.warnings):
+                    exit_code = max(exit_code, 1)
+            return exit_code
     except ValidationError as exc:
         print(exc, file=sys.stderr)
         return 2
