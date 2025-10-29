@@ -432,21 +432,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             exit_code = 0
             for remote_file in remote_files:
-                print(f"[download] {remote_file.relative_path}")
                 local_path = download_remote_file(ftp, remote_file, destination_root)
                 result = validate_pcap(tshark_path, local_path)
 
                 status_ok = result.ok and not (args.fail_on_warning and result.warnings)
                 status = "OK" if status_ok else "FAIL"
                 print(f"[{status}] {remote_file.relative_path}")
-                if result.packet_count is not None:
-                    print(f"  packets: {result.packet_count}")
-                if result.warnings:
-                    for warning in result.warnings:
-                        line = f"  warning: {warning}"
-                        print(line)
-                        if args.fail_on_warning:
-                            result.ok = False
+
                 if not status_ok:
                     block_lines: List[str] = [f"File: {remote_file.relative_path}"]
                     if result.warnings:
@@ -458,6 +450,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     if not result.errors and not result.warnings:
                         block_lines.append("No additional details available.")
                     error_entries.append("\n".join(block_lines))
+
                 if result.errors:
                     exit_code = max(exit_code, 1)
                 elif args.fail_on_warning and result.warnings:
