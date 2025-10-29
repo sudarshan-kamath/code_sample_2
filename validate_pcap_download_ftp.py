@@ -467,10 +467,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 1
 
             exit_code = 0
+            collected_results: List[ValidationResult] = []
             for remote_file in remote_files:
                 print(f"[download] {remote_file.relative_path}")
                 local_path = download_remote_file(ftp, remote_file, destination_root)
                 result = validate_pcap(tshark_path, local_path)
+                collected_results.append(result)
 
                 status_ok = result.ok and not (args.fail_on_warning and result.warnings)
                 status = "OK" if status_ok else "FAIL"
@@ -491,6 +493,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         print(f"  error: {err}", file=sys.stderr)
                 if not result.ok or (args.fail_on_warning and result.warnings):
                     exit_code = max(exit_code, 1)
+
+            report_path = destination_root / "pcap_validation_report.html"
+            try:
+                render_html_report(collected_results, report_path)
+                print(f"HTML report written to {report_path}")
+            except OSError as exc:
+                print(f"Failed to write HTML report: {exc}", file=sys.stderr)
+
             return exit_code
     except ValidationError as exc:
         print(exc, file=sys.stderr)
