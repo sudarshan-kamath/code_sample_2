@@ -57,8 +57,8 @@ def _scan_for_warnings(stderr: str) -> Dict[str, List[str]]:
         return {"warnings": warnings, "errors": errors}
 
     keywords = {
-        "malformed": warnings,
-        "truncated": warnings,
+        "malformed": errors,
+        "truncated": errors,
         "corrupt": errors,
         "error": errors,
         "failed": errors,
@@ -232,6 +232,43 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
         result.packet_count = _count_packets(tshark_bin, file_path)
     except ValidationError as exc:
         result.warnings.append(str(exc))
+
+    malformed_cmd = [
+        tshark_bin,
+        "-r",
+        str(file_path),
+        "-Y",
+        "_ws.malformed",
+        "-c",
+        "1",
+        "-T",
+        "fields",
+        "-E",
+        "separator=|",
+        "-e",
+        "frame.number",
+        "-e",
+        "frame.col_info",
+    ]
+    malformed_proc = subprocess.run(
+        malformed_cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    malformed_output = (malformed_proc.stdout or "").strip()
+    if malformed_proc.returncode not in {0, 1}:
+        result.warnings.append(
+            f"Malformed frame probe failed for {file_path}: {malformed_proc.stderr.strip()}"
+        )
+    elif malformed_output:
+        frame_info = malformed_output.split("|", maxsplit=1)
+        frame_number = frame_info[0].strip()
+        detail = frame_info[1].strip() if len(frame_info) > 1 else ""
+        message = f"Malformed frame detected: frame {frame_number}"
+        if detail:
+            message = f"{message}: {detail}"
+        result.errors.append(message)
 
     result.ok = not result.errors
     return result
