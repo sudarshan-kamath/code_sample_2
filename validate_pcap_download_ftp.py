@@ -436,9 +436,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 result = validate_pcap(tshark_path, local_path)
 
                 status_ok = result.ok and not (args.fail_on_warning and result.warnings)
-                status = "OK" if status_ok else "FAIL"
-                print(f"[{status}] {remote_file.relative_path}")
-
                 if not status_ok:
                     block_lines: List[str] = [f"File: {remote_file.relative_path}"]
                     if result.warnings:
