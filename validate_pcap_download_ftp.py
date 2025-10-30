@@ -304,36 +304,21 @@ def discover_remote_pcaps(
     ftp: ftplib.FTP,
     patterns: Iterable[str],
 ) -> List[RemoteFile]:
-    """Return a list of remote files matching provided patterns."""
+    """Return a list of remote files matching provided patterns using nlst only."""
     results: List[RemoteFile] = []
     pattern_list = list(patterns)
 
-    entries: List[tuple[str, Optional[dict]]] = []
-    supports_mlsd = hasattr(ftp, "mlsd")
-    if supports_mlsd:
-        try:
-            entries = [(name, facts) for name, facts in ftp.mlsd()]  # type: ignore[attr-defined]
-        except ftplib.error_perm:
-            entries = []
-        except AttributeError:
-            entries = []
-    if not entries:
-        try:
-            names = ftp.nlst()
-        except ftplib.error_perm as exc:
-            raise ValidationError(f"Unable to list directory '.': {exc}") from exc
-        entries = [(posixpath.basename(name.rstrip("/")), None) for name in names]
+    try:
+        names = ftp.nlst()
+    except ftplib.error_perm as exc:
+        raise ValidationError(f"Unable to list directory '.': {exc}") from exc
 
-    for name, facts in entries:
-        if not name or name in {".", ".."}:
+    for name in names:
+        base = posixpath.basename(name.rstrip("/"))
+        if not base or base in {".", ".."}:
             continue
-        is_dir = False
-        if facts and isinstance(facts, dict):
-            is_dir = facts.get("type", "") in {"dir", "cdir", "pdir"}
-        if is_dir:
-            continue
-        if any(fnmatch.fnmatch(name, pattern) for pattern in pattern_list):
-            results.append(RemoteFile(name))
+        if any(fnmatch.fnmatch(base, pattern) for pattern in pattern_list):
+            results.append(RemoteFile(base))
 
     unique = {entry.relative_path: entry for entry in results}
     return [unique[key] for key in sorted(unique)]
