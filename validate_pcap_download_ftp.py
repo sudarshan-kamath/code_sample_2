@@ -162,6 +162,7 @@ def _count_packets(tshark_bin: str, file_path: Path) -> int:
     finally:
         process.stdout.close()
 
+    # Capture stderr after streaming to detect any truncation or parsing issues.
     stderr = ""
     if process.stderr is not None:
         stderr = process.stderr.read()
@@ -214,6 +215,7 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
         return result
 
     result.stderr = completed.stderr or ""
+    # Capture stderr noise from tshark so warnings are surfaced alongside hard failures.
     buckets = _scan_for_warnings(result.stderr)
     result.warnings = buckets["warnings"]
     result.errors = buckets["errors"]
@@ -222,12 +224,14 @@ def validate_pcap(tshark_bin: str, file_path: Path) -> ValidationResult:
         return result
 
     try:
+        # Pull the first frame into JSON to expose headers such as length and protocol stack.
         result.first_frame = _collect_first_frame(tshark_bin, file_path)
     except ValidationError as exc:
         result.errors.append(str(exc))
         return result
 
     try:
+        # Stream the entire capture to count packets; this also reveals truncation warnings.
         result.packet_count = _count_packets(tshark_bin, file_path)
     except ValidationError as exc:
         result.warnings.append(str(exc))
@@ -285,11 +289,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--tshark-bin",
         default="tshark",
         help="Path to the tshark binary (default: tshark).",
-    )
-    parser.add_argument(
-        "--fail-on-warning",
-        action="store_true",
-        help="Treat tshark warnings as errors.",
     )
     parser.add_argument(
         "--timeout",
@@ -360,10 +359,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     password = args.password or ""
+    fail_on_warning = True
 
     destination_root = args.download_dir.resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
 
+    # Collect per-file findings and emit a consolidated error report at the end.
     error_log_path = destination_root / "error.log"
     error_entries: List[str] = []
 
@@ -374,6 +375,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except OSError as exc:
                 print(f"Failed to write error log {error_log_path}: {exc}", file=sys.stderr)
                 return 2
+            # Surface a single failure line and direct the user to the detailed log.
             print(f"[FAIL] Look here for error log: {error_log_path}", file=sys.stderr)
             return exit_code if exit_code != 0 else 1
         if error_log_path.exists():
@@ -381,16 +383,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 error_log_path.unlink()
             except OSError:
                 pass
+        # If nothing bad happened, confirm success explicitly on stderr.
         print("[OK] All PCAP files are valid", file=sys.stderr)
         return 0
 
     ftp = ftplib.FTP()
     try:
         ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
+        # Anonymous access defaults to an empty password; authenticated users supply one.
         ftp.login(args.username, password or "")
         if args.ftp_path and args.ftp_path != "/":
             ftp.cwd(args.ftp_path)
 
+        # List the FTP directory once and decide which captures need to be processed.
         remote_files = discover_remote_pcaps(
             ftp,
             args.pcap_pattern,
@@ -400,12 +405,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _finalize(1)
 
         exit_code = 0
+        # Download each matching capture and run the validator to accumulate results.
         for remote_file in remote_files:
             local_path = download_remote_file(ftp, remote_file, destination_root)
             result = validate_pcap(tshark_path, local_path)
 
-            status_ok = result.ok and not (args.fail_on_warning and result.warnings)
+            status_ok = result.ok and not (fail_on_warning and result.warnings)
             if not status_ok:
+                # Persist warnings/errors for this file so they can be written to error.log later.
                 block_lines: List[str] = [f"File: {remote_file.relative_path}"]
                 if result.warnings:
                     block_lines.append("Warnings:")
@@ -419,13 +426,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             if result.errors:
                 exit_code = max(exit_code, 1)
-            elif args.fail_on_warning and result.warnings:
+            elif fail_on_warning and result.warnings:
                 exit_code = max(exit_code, 1)
         return _finalize(exit_code)
     except ValidationError as exc:
+        # Validation raised a fatal issue—record it and propagate through finalize.
         error_entries.append(str(exc))
         return _finalize(2)
     except ftplib.all_errors as exc:
+        # FTP-level errors also feed into the consolidated log.
         error_entries.append(f"FTP error: {exc}")
         return _finalize(2)
     finally:
@@ -433,6 +442,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ftp.quit()
         except ftplib.all_errors:
             ftp.close()
+
+
+def run_validation(
+    *,
+    ftp_host: str,
+    port: int = 21,
+    ftp_path: str = "/",
+    username: str = "anonymous",
+    password: str = "",
+    download_dir: str,
+    pcap_patterns: Optional[Iterable[str]] = None,
+    timeout: float = 60.0,
+    tshark_bin: str = "tshark",
+) -> int:
+    """Convenience wrapper that accepts explicit parameters and forwards to :func:`main`."""
+    args: List[str] = [
+        "--ftp-host", ftp_host,
+        "--port", str(port),
+        "--ftp-path", ftp_path,
+        "--username", username,
+        "--download-dir", download_dir,
+        "--timeout", str(timeout),
+        "--tshark-bin", tshark_bin,
+    ]
+
+    if password:
+        args.extend(["--password", password])
+
+    patterns = list(pcap_patterns) if pcap_patterns is not None else ["*.pcap", "*.pcapng"]
+    for pattern in patterns:
+        args.extend(["--pcap-pattern", pattern])
+
+    return main(args)
 
 
 if __name__ == "__main__":
