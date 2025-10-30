@@ -16,20 +16,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Type
 
 
-RESET = "\033[0m"
-COLOR_OK = "\033[92m"
-COLOR_FAIL = "\033[91m"
-USE_COLOR = sys.stderr.isatty()
-
-
 class ValidationError(Exception):
     """Raised when validation prerequisites are not met."""
-
-
-def _color(text: str, color: str) -> str:
-    if not USE_COLOR:
-        return text
-    return f"{color}{text}{RESET}"
 
 
 def _run_command(
@@ -391,8 +379,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     destination_root = args.download_dir.resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
 
-    ftp_cls: Type[ftplib.FTP] = ftplib.FTP
-
     error_log_path = destination_root / "error.log"
     error_entries: List[str] = []
 
@@ -403,62 +389,65 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except OSError as exc:
                 print(f"Failed to write error log {error_log_path}: {exc}", file=sys.stderr)
                 return 2
-            fail_msg = _color("[FAIL]", COLOR_FAIL)
-            print(f"{fail_msg} Look here for error log: {error_log_path}", file=sys.stderr)
+            print(f"[FAIL] Look here for error log: {error_log_path}", file=sys.stderr)
             return exit_code if exit_code != 0 else 1
         if error_log_path.exists():
             try:
                 error_log_path.unlink()
             except OSError:
                 pass
-        ok_msg = _color("[OK] All PCAP files are valid", COLOR_OK)
-        print(ok_msg, file=sys.stderr)
+        print("[OK] All PCAP files are valid", file=sys.stderr)
         return 0
 
+    ftp = ftplib.FTP()
     try:
-        with ftp_cls() as ftp:
-            ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
-            ftp.login(args.username, password or "")
-            if args.ftp_path and args.ftp_path != "/":
-                ftp.cwd(args.ftp_path)
+        ftp.connect(args.ftp_host, args.port, timeout=args.timeout)
+        ftp.login(args.username, password or "")
+        if args.ftp_path and args.ftp_path != "/":
+            ftp.cwd(args.ftp_path)
 
-            remote_files = discover_remote_pcaps(
-                ftp,
-                args.pcap_pattern,
-            )
-            if not remote_files:
-                error_entries.append("No PCAP files found to download.")
-                return _finalize(1)
+        remote_files = discover_remote_pcaps(
+            ftp,
+            args.pcap_pattern,
+        )
+        if not remote_files:
+            error_entries.append("No PCAP files found to download.")
+            return _finalize(1)
 
-            exit_code = 0
-            for remote_file in remote_files:
-                local_path = download_remote_file(ftp, remote_file, destination_root)
-                result = validate_pcap(tshark_path, local_path)
+        exit_code = 0
+        for remote_file in remote_files:
+            local_path = download_remote_file(ftp, remote_file, destination_root)
+            result = validate_pcap(tshark_path, local_path)
 
-                status_ok = result.ok and not (args.fail_on_warning and result.warnings)
-                if not status_ok:
-                    block_lines: List[str] = [f"File: {remote_file.relative_path}"]
-                    if result.warnings:
-                        block_lines.append("Warnings:")
-                        block_lines.extend(f"  - {warning}" for warning in result.warnings)
-                    if result.errors:
-                        block_lines.append("Errors:")
-                        block_lines.extend(f"  - {err}" for err in result.errors)
-                    if not result.errors and not result.warnings:
-                        block_lines.append("No additional details available.")
-                    error_entries.append("\n".join(block_lines))
-
+            status_ok = result.ok and not (args.fail_on_warning and result.warnings)
+            if not status_ok:
+                block_lines: List[str] = [f"File: {remote_file.relative_path}"]
+                if result.warnings:
+                    block_lines.append("Warnings:")
+                    block_lines.extend(f"  - {warning}" for warning in result.warnings)
                 if result.errors:
-                    exit_code = max(exit_code, 1)
-                elif args.fail_on_warning and result.warnings:
-                    exit_code = max(exit_code, 1)
-            return _finalize(exit_code)
+                    block_lines.append("Errors:")
+                    block_lines.extend(f"  - {err}" for err in result.errors)
+                if not result.errors and not result.warnings:
+                    block_lines.append("No additional details available.")
+                error_entries.append("\n".join(block_lines))
+
+            if result.errors:
+                exit_code = max(exit_code, 1)
+            elif args.fail_on_warning and result.warnings:
+                exit_code = max(exit_code, 1)
+        return _finalize(exit_code)
     except ValidationError as exc:
         error_entries.append(str(exc))
         return _finalize(2)
     except ftplib.all_errors as exc:
         error_entries.append(f"FTP error: {exc}")
         return _finalize(2)
+    finally:
+        try:
+            ftp.quit()
+        except ftplib.all_errors:
+            ftp.close()
 
 
 if __name__ == "__main__":
